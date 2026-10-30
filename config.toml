@@ -1,0 +1,27 @@
+[server]
+host = "0.0.0.0"
+tcp_port = 9000
+udp_port = 9001
+db_path = "server/data/app.db"
+heartbeat_interval = 5.0
+session_timeout = 15.0
+offline_retention_days = 7
+offline_max_per_user = 500
+offline_max_payload = 65536
+
+[client]
+server_host = "127.0.0.1"
+server_tcp_port = 9000
+server_udp_port = 9001
+ui_host = "127.0.0.1"
+ui_port = 8080
+download_dir = "downloads"
+
+[protocol]
+chunk_size = 700
+window_packets = 64
+max_file_size = 104857600
+rto_min = 0.2
+rto_max = 2.0
+max_retries = 10
+congestion = "reno"

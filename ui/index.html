@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LAN Collaboration</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <div class="brand">LAN Collaboration</div>
+    <div class="status">
+      <span id="status-dot" class="dot"></span>
+      <span id="status-text">disconnected</span>
+      <span id="user-text"></span>
+    </div>
+    <div class="actions">
+      <button id="reconnect-btn" type="button" class="secondary">Reconnect</button>
+      <button id="logout-btn" type="button" class="secondary">Logout</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="login-panel" class="login">
+      <h1>Sign in</h1>
+      <p class="muted">Demo users: alice / bob / charlie, password <code>password123</code></p>
+      <form id="login-form">
+        <label>Username<input id="login-username" autocomplete="username" value="alice" required></label>
+        <label>Password<input id="login-password" type="password" autocomplete="current-password" value="password123" required></label>
+        <button type="submit">Connect</button>
+      </form>
+      <p id="login-error" class="error"></p>
+    </section>
+
+    <section id="app-panel" class="app hidden">
+      <aside class="peers">
+        <h2>Online peers</h2>
+        <ul id="peer-list"></ul>
+      </aside>
+
+      <section class="chat">
+        <div id="messages" class="messages"></div>
+        <form id="send-form" class="send-form">
+          <select id="send-to" aria-label="Recipient"></select>
+          <input id="send-text" placeholder="Type a message..." autocomplete="off" required>
+          <button type="submit">Send</button>
+        </form>
+        <form id="file-form" class="file-form">
+          <input id="file-input" type="file" required>
+          <button type="submit" class="secondary">Send file</button>
+        </form>
+      </section>
+
+      <aside class="transfers">
+        <h2>Transfers</h2>
+        <div id="transfer-list"></div>
+      </aside>
+    </section>
+  </main>
+
+  <p id="global-error" class="error footer"></p>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,77 @@
+from __future__ import annotations
+
+from enum import IntEnum, IntFlag
+
+VERSION = 1
+HEADER_SIZE = 32
+HEADER_FORMAT = "!BBBBIIIIIHHI"
+
+DEFAULT_TCP_PORT = 9000
+DEFAULT_UDP_PORT = 9001
+DEFAULT_UI_PORT = 8080
+
+MAX_UDP_PAYLOAD = 1200
+DEFAULT_CHUNK_SIZE = 700
+DEFAULT_WINDOW = 64
+DEFAULT_RTO_MIN = 0.2
+DEFAULT_RTO_MAX = 2.0
+DEFAULT_MAX_RETRIES = 10
+MAX_FILE_SIZE = 100 * 1024 * 1024
+MAX_TCP_FRAME = 1024 * 1024
+
+OFFLINE_RETENTION_DAYS = 7
+OFFLINE_MAX_PER_USER = 500
+OFFLINE_MAX_PAYLOAD = 64 * 1024
+
+DEFAULT_USERNAME = "alice"
+DEFAULT_PASSWORD = "password123"
+
+
+class PacketType(IntEnum):
+    DATA = 1
+    ACK = 2
+    NACK = 3
+    PING = 4
+    PONG = 5
+    HELLO = 6
+    BYE = 7
+
+
+class Flags(IntFlag):
+    NONE = 0
+    FIRST = 1
+    LAST = 2
+    ENCRYPTED = 4
+
+
+class AppType(IntEnum):
+    TEXT = 1
+    FILE_META = 2
+    FILE_CHUNK = 3
+    FILE_END = 4
+    FILE_RESULT = 5
+    FILE_ACCEPT = 6
+    FILE_REJECT = 7
+    FILE_INCOMING = 8
+    TEXT_ACK = 9
+
+
+class TCPType:
+    HELLO = "HELLO"
+    HELLO_ACK = "HELLO_ACK"
+    AUTH_REQ = "AUTH_REQ"
+    AUTH_OK = "AUTH_OK"
+    AUTH_ERR = "AUTH_ERR"
+    PRESENCE = "PRESENCE"
+    PING = "PING"
+    PONG = "PONG"
+    BYE = "BYE"
+    ERROR = "ERROR"
+    FILE_CTRL = "FILE_CTRL"
+
+
+DEFAULT_USERS = [
+    ("alice", DEFAULT_PASSWORD),
+    ("bob", DEFAULT_PASSWORD),
+    ("charlie", DEFAULT_PASSWORD),
+]
