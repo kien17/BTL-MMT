@@ -102,15 +102,14 @@ File nhận được lưu trong `downloads/`; có thể tải lại từ UI.
 
 ## 5. Tính năng demo
 
-1. Đăng nhập 2–3 client → thấy peer list cập nhật realtime (polling).
-2. Chat broadcast (`Broadcast`) hoặc chọn một peer để chat riêng.
-3. Gửi file: chọn recipient cụ thể, chọn file, bấm **Send file**; theo dõi progress bar.
-4. Offline message:
-   - Alice gửi tin nhắn cho Bob khi Bob chưa online.
-   - Bob login → nhận tin nhắn cũ (đánh dấu `offline`).
-5. Đóng client Bob → Alice thấy Bob offline; gửi tiếp sẽ vào queue.
-6. Reconnect: bấm **Reconnect** trên UI.
-7. Encryption: payload TCP/UDP được mã hoá bằng AES-256-GCM; có thể kiểm tra bằng log/packet capture (nội dung không đọc được).
+1. Đăng nhập 2–3 client (có nút chọn nhanh tài khoản demo `alice`, `bob`, `charlie` trên màn hình đăng nhập) → thấy danh bạ đầy đủ cả người đang `🟢 Online` và `🌙 Offline` cập nhật realtime (polling).
+2. Chat theo từng cuộc trò chuyện: chọn kênh **📢 Kênh Chung (Broadcast)** hoặc bấm vào bất kỳ peer nào ở Sidebar trái để chat riêng (hỗ trợ lọc theo cuộc trò chuyện hoặc xem tất cả tin nhắn).
+3. Gửi file: chọn recipient cụ thể, chọn tệp đính kèm, bấm **Gửi File ↑**; theo dõi progress bar và tải về.
+4. **Offline Queue (Hàng đợi tin nhắn 2 chiều)**:
+   - **Server Offline Queue (Khi người nhận Offline)**: Alice chọn `bob` (đang `🌙 Offline`) và gửi tin nhắn → Server lưu vào SQLite `offline_messages`, UI của Alice hiện nhãn **`🕒 Đã lưu Offline Queue`**. Khi Bob đăng nhập hoặc bấm **🔄 Kết nối lại**, Server tự động đẩy tin nhắn xuống cho Bob (kèm nhãn **`📥 Nhận từ Offline Queue`**) và cập nhật trạng thái bên Alice sang **`✓✓ Đã nhận (Delivered)`**.
+   - **Chế độ Offline & Client Outbox Queue (Khi người gửi Offline)**: Bấm nút **🌙 Chuyển Offline** trên thanh công cụ để ngắt kết nối tạm thời mà vẫn giữ giao diện chat. Tin nhắn gửi lúc này được lưu vào **Outbox Queue** (`⏳ Hàng đợi Outbox`) và tự động đồng bộ lên Server ngay khi bấm **🔄 Kết nối lại**.
+   - **Bảng giám sát Queue (Sidebar phải)**: Thống kê trực quan số lượng tin nhắn trong *Outbox*, *Server Queue*, và *Đã nhận Offline*.
+5. Encryption: payload TCP/UDP được mã hoá bằng AES-256-GCM; có thể kiểm tra bằng log/packet capture (nội dung không đọc được).
 
 ---
 
@@ -127,6 +126,7 @@ Test hiện có:
 - `tests/test_protocol.py`: header, CRC, TCP frame, app reassembler, AES-GCM.
 - `tests/test_crypto.py`: X25519, scrypt, SHA-256.
 - `tests/test_reliability.py`: lossless, mất gói + retransmit, không HoL giữa stream, file stream.
+- `tests/test_offline_queue.py`: danh bạ online/offline, Server Offline Queue end-to-end, cập nhật ACK khi nhận tin offline, và Client Outbox Queue khi mất kết nối.
 
 ### Mô phỏng mất gói
 

@@ -93,6 +93,24 @@ class Storage:
             ).fetchone()
         return row is not None
 
+    def list_users(self) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT username FROM users ORDER BY username ASC"
+            ).fetchall()
+        return [str(row["username"]) for row in rows]
+
+    def pending_counts_by_recipient(self) -> dict[str, int]:
+        now = datetime.now(UTC).isoformat()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT recipient, COUNT(*) AS total FROM offline_messages "
+                "WHERE delivered_at IS NULL AND expires_at > ? "
+                "GROUP BY recipient",
+                (now,),
+            ).fetchall()
+        return {str(row["recipient"]): int(row["total"]) for row in rows}
+
     def count_offline(self, recipient: str) -> int:
         with self._lock:
             row = self._conn.execute(

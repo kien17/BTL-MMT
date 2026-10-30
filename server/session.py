@@ -3,11 +3,15 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from common.app_protocol import AppReassembler, encode_app
 from common.constants import AppType, TCPType
 from common.protocol import PacketHeader, random_session_id, random_stream_id, write_tcp_frame
 from common.reliability import ReliableEndpoint
+
+if TYPE_CHECKING:
+    from server.storage import Storage
 
 
 @dataclass
@@ -24,6 +28,7 @@ class Session:
     connected_at: float = field(default_factory=time.monotonic)
     reassembler: AppReassembler = field(default_factory=AppReassembler)
     pending_offline: dict[int, str] = field(default_factory=dict)
+    pending_live: dict[int, dict] = field(default_factory=dict)
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @property
@@ -66,9 +71,10 @@ class Session:
 
 
 class SessionManager:
-    def __init__(self) -> None:
+    def __init__(self, storage: Storage | None = None) -> None:
         self._by_name: dict[str, Session] = {}
         self._by_id: dict[int, Session] = {}
+        self.storage = storage
 
     def next_session_id(self) -> int:
         while True:
@@ -100,14 +106,25 @@ class SessionManager:
 
     def peers(self) -> list[dict]:
         now = time.monotonic()
-        return [
-            {
-                "username": session.username,
-                "online_seconds": int(now - session.connected_at),
-                "udp_ready": session.udp_ready,
-            }
-            for session in sorted(self._by_name.values(), key=lambda item: item.username)
-        ]
+        all_usernames = set(self._by_name.keys())
+        queued_counts: dict[str, int] = {}
+        if self.storage is not None:
+            all_usernames.update(self.storage.list_users())
+            queued_counts = self.storage.pending_counts_by_recipient()
+        result: list[dict] = []
+        for username in sorted(all_usernames):
+            session = self._by_name.get(username)
+            is_online = session is not None
+            result.append(
+                {
+                    "username": username,
+                    "online": is_online,
+                    "online_seconds": int(now - session.connected_at) if session is not None else 0,
+                    "udp_ready": session.udp_ready if session is not None else False,
+                    "queued_count": queued_counts.get(username, 0),
+                }
+            )
+        return result
 
     def presence_payload(self) -> dict:
         return {"type": TCPType.PRESENCE, "peers": self.peers()}

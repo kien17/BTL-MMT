@@ -278,11 +278,11 @@ sequenceDiagram
     Note over C,S: UDP data channel ready
 ```
 
-### 7.2 Presence
+### 7.2 Presence & Danh bạ
 
-- Sau `AUTH_OK`, server gửi snapshot danh sách user online.
-- Khi user join/leave, server broadcast `PRESENCE` tới tất cả client.
-- Client cập nhật peer list; UI poll `/api/state` để hiển thị.
+- Sau `AUTH_OK` và mỗi khi có thay đổi trạng thái/queue, server gửi `PRESENCE` chứa toàn bộ danh sách user trong hệ thống kèm trạng thái `online: true/false`, `udp_ready`, `online_seconds` và `queued_count` (số tin nhắn đang chờ trong Offline Queue).
+- Nhờ có danh bạ đầy đủ, client có thể chọn nhắn tin cho bất kỳ user nào ngay cả khi người đó đang offline.
+- UI poll `/api/state` để hiển thị trạng thái Online/Offline, số tin chưa đọc và số tin đang nằm trong hàng đợi.
 
 ### 7.3 Chat unicast
 
@@ -338,14 +338,19 @@ sequenceDiagram
 - Backpressure: sender chờ window trống trước khi đọc chunk tiếp.
 - Receiver ghi vào file `.part`, verify hash rồi rename.
 
-### 7.6 Offline message queue
+### 7.6 Offline message queue (Server Queue & Client Outbox)
 
-- Chỉ áp dụng cho text unicast.
-- Server lưu vào SQLite với `msg_id` duy nhất, `expires_at`.
-- Khi user login và UDP bound, server đẩy các message chưa delivered theo thứ tự `created_at`.
-- Mark `delivered_at` khi stream tương ứng được ACK đầy đủ.
-- Client dedup theo `msg_id` để tránh trùng khi reconnect.
-- Giới hạn: 7 ngày, 500 message/user, payload ≤ 64KB.
+- **Server-side Offline Queue (khi người nhận offline)**:
+  - Áp dụng cho tin nhắn text unicast.
+  - Server lưu vào SQLite (`offline_messages`) với `msg_id` duy nhất và `expires_at`.
+  - Nếu người nhận ngắt kết nối đột ngột khi gói UDP chưa được ACK (`pending_live`), server tự động cứu tin nhắn chưa ACK đưa vào `offline_messages` và báo `TEXT_ACK {status=queued}` cho người gửi.
+  - Khi người nhận login và kênh UDP sẵn sàng (`UDP HELLO`), server đẩy toàn bộ tin nhắn chưa delivered theo thứ tự `created_at` với cờ `offline: true`.
+  - Khi stream tương ứng được ACK đầy đủ (`on_stream_acked`), server đánh dấu `delivered_at` trong DB và gửi `TEXT_ACK {status=delivered}` cho người gửi (nếu đang online) để cập nhật UI thời gian thực.
+  - Giới hạn: lưu tối đa 7 ngày, 500 message/user, payload ≤ 64KB.
+- **Client-side Outbox Queue (khi người gửi offline)**:
+  - Khi client mất kết nối hoặc chủ động chuyển sang **Chế độ Offline** (`/api/disconnect`), giao diện chat vẫn giữ nguyên và cho phép tiếp tục soạn tin nhắn.
+  - Tin nhắn gửi lúc offline được lưu vào `outbox_queue` tại `ClientCore` (`status=queued_local`) và tự động flush qua UDP ngay khi client kết nối lại (`/api/reconnect`).
+  - Client dedup theo `msg_id` để tránh trùng lặp khi reconnect.
 
 ### 7.7 Timeout và reconnect
 
@@ -474,6 +479,7 @@ CREATE INDEX IF NOT EXISTS idx_offline_recipient
 │   └── run_server.py
 ├── tests/
 │   ├── test_crypto.py
+│   ├── test_offline_queue.py
 │   ├── test_protocol.py
 │   └── test_reliability.py
 ├── docs/

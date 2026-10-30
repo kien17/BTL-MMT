@@ -16,7 +16,7 @@ from common.app_protocol import (
     decode_file_chunk,
 )
 from common.config import Config
-from common.constants import AppType, TCPType
+from common.constants import DEFAULT_USERS, AppType, TCPType
 
 
 class ClientCore:
@@ -27,10 +27,12 @@ class ClientCore:
         self.transfers = FileTransferManager(self)
         self.username = ""
         self.password = ""
+        self.authenticated = False
         self.status = "disconnected"
         self.error = ""
         self.peers: list[dict] = []
         self.messages: deque[dict] = deque(maxlen=500)
+        self.outbox_queue: deque[dict] = deque(maxlen=500)
         self._reassembler = AppReassembler()
         self._control_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
@@ -44,6 +46,9 @@ class ClientCore:
         async with self._login_lock:
             if self.status in {"online", "connecting"}:
                 return
+            if self.username and self.username != username:
+                self.messages.clear()
+                self.outbox_queue.clear()
             self.username = username
             self.password = password
             self.status = "connecting"
@@ -74,12 +79,13 @@ class ClientCore:
                 )
                 await data.wait_ready(timeout=5.0)
             except Exception as exc:
-                self.status = "error"
+                self.status = "offline" if self.authenticated else "error"
                 self.error = str(exc)
                 await data.close()
                 self.data = None
                 raise
 
+            self.authenticated = True
             self.peers = list(self.control.peers)
             self.status = "online"
             self.add_message(
@@ -92,10 +98,49 @@ class ClientCore:
                     "kind": "system",
                 }
             )
+            self._flush_outbox()
             self._control_task = asyncio.create_task(self._control_loop(), name="control-loop")
             self._heartbeat_task = asyncio.create_task(
                 self._heartbeat_loop(), name="heartbeat-loop"
             )
+
+    def _flush_outbox(self) -> None:
+        if not self.online or self.data is None:
+            return
+        while self.outbox_queue:
+            item = self.outbox_queue.popleft()
+            msg_id = str(item.get("msg_id", ""))
+            to = str(item.get("to", ""))
+            text = str(item.get("text", ""))
+            ts = float(item.get("ts", time.time()))
+            if not msg_id or not to or not text:
+                continue
+            self._update_message_status(msg_id, "sending")
+            self.data.send_app(
+                AppType.TEXT,
+                {"msg_id": msg_id, "to": to, "text": text, "ts": ts},
+            )
+
+    def _requeue_sending_messages(self) -> None:
+        queued_ids = {str(item.get("msg_id", "")) for item in self.outbox_queue}
+        for message in self.messages:
+            if (
+                message.get("from") == self.username
+                and message.get("kind") == "text"
+                and message.get("status") == "sending"
+            ):
+                msg_id = str(message.get("msg_id", ""))
+                message["status"] = "queued_local"
+                if msg_id and msg_id not in queued_ids:
+                    self.outbox_queue.append(
+                        {
+                            "msg_id": msg_id,
+                            "to": str(message.get("to", "")),
+                            "text": str(message.get("text", "")),
+                            "ts": float(message.get("ts", time.time())),
+                        }
+                    )
+                    queued_ids.add(msg_id)
 
     async def _control_loop(self) -> None:
         try:
@@ -107,13 +152,15 @@ class ClientCore:
                 self.error = str(exc)
         finally:
             if self.status == "online":
-                self.status = "disconnected"
+                self.status = "offline"
+                self._requeue_sending_messages()
+                self._mark_peers_offline()
                 self.add_message(
                     {
                         "msg_id": f"system-{uuid.uuid4().hex}",
                         "from": "system",
                         "to": self.username,
-                        "text": "disconnected from server",
+                        "text": "disconnected from server (offline mode)",
                         "ts": time.time(),
                         "kind": "system",
                     }
@@ -170,6 +217,7 @@ class ClientCore:
                     "ts": float(obj.get("ts", time.time())),
                     "kind": "text",
                     "offline": bool(obj.get("offline", False)),
+                    "queued_at": str(obj.get("queued_at", "")),
                 }
             )
         elif app_type is AppType.TEXT_ACK and obj is not None:
@@ -195,7 +243,7 @@ class ClientCore:
         self.messages.append(message)
 
     async def send_text(self, to: str, text: str) -> str:
-        if not self.online or self.data is None:
+        if not self.username and not self.online:
             raise RuntimeError("not connected")
         to = to.strip()
         text = text.strip()
@@ -203,10 +251,17 @@ class ClientCore:
             raise ValueError("recipient and text are required")
         msg_id = uuid.uuid4().hex
         timestamp = time.time()
-        self.data.send_app(
-            AppType.TEXT,
-            {"msg_id": msg_id, "to": to, "text": text, "ts": timestamp},
-        )
+        if self.online and self.data is not None:
+            self.data.send_app(
+                AppType.TEXT,
+                {"msg_id": msg_id, "to": to, "text": text, "ts": timestamp},
+            )
+            status = "sending"
+        else:
+            self.outbox_queue.append(
+                {"msg_id": msg_id, "to": to, "text": text, "ts": timestamp}
+            )
+            status = "queued_local"
         self.add_message(
             {
                 "msg_id": msg_id,
@@ -215,7 +270,7 @@ class ClientCore:
                 "text": text,
                 "ts": timestamp,
                 "kind": "text",
-                "status": "sending",
+                "status": status,
             }
         )
         return msg_id
@@ -225,14 +280,51 @@ class ClientCore:
             raise RuntimeError("not connected")
         return await self.transfers.start_send(to, file_path)
 
+    def _mark_peers_offline(self) -> None:
+        self.peers = [
+            {
+                **peer,
+                "online": False,
+                "udp_ready": False,
+                "online_seconds": 0,
+            }
+            for peer in self.peers
+        ]
+
+    def _merged_peers(self) -> list[dict]:
+        by_name: dict[str, dict] = {}
+        for username, _ in DEFAULT_USERS:
+            by_name[username] = {
+                "username": username,
+                "online": False,
+                "online_seconds": 0,
+                "udp_ready": False,
+                "queued_count": 0,
+            }
+        for peer in self.peers:
+            uname = str(peer.get("username", ""))
+            if not uname:
+                continue
+            is_online = bool(peer.get("online", True)) if self.online else False
+            by_name[uname] = {
+                "username": uname,
+                "online": is_online,
+                "online_seconds": int(peer.get("online_seconds", 0)) if is_online else 0,
+                "udp_ready": bool(peer.get("udp_ready", False)) if is_online else False,
+                "queued_count": int(peer.get("queued_count", 0)),
+            }
+        return [by_name[name] for name in sorted(by_name)]
+
     def get_state(self) -> dict:
         return {
-            "logged_in": self.online,
+            "logged_in": self.authenticated or self.online,
+            "online": self.online,
             "username": self.username,
             "status": self.status,
             "error": self.error,
-            "peers": self.peers,
+            "peers": self._merged_peers(),
             "messages": list(self.messages),
+            "outbox": list(self.outbox_queue),
             "transfers": self.transfers.snapshot(),
             "server": f"{self.config.client.server_host}:{self.config.client.server_tcp_port}",
         }
@@ -240,15 +332,10 @@ class ClientCore:
     def download_path(self, transfer_id: int) -> Path | None:
         return self.transfers.download_path(transfer_id)
 
-    async def reconnect(self) -> None:
-        username = self.username
-        password = self.password
-        await self.logout()
-        if username and password:
-            await self.login(username, password)
-
-    async def logout(self) -> None:
-        self.status = "disconnected"
+    async def disconnect(self, silent: bool = False) -> None:
+        was_online = self.status == "online"
+        self.status = "offline" if self.authenticated else "disconnected"
+        self._requeue_sending_messages()
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()
             await asyncio.gather(self._heartbeat_task, return_exceptions=True)
@@ -262,4 +349,33 @@ class ClientCore:
             await self.data.close()
             self.data = None
         self.transfers.close()
+        self._mark_peers_offline()
+        if was_online and not silent and self.username:
+            self.add_message(
+                {
+                    "msg_id": f"system-{uuid.uuid4().hex}",
+                    "from": "system",
+                    "to": self.username,
+                    "text": "switched to offline mode",
+                    "ts": time.time(),
+                    "kind": "system",
+                }
+            )
+
+    async def reconnect(self) -> None:
+        username = self.username
+        password = self.password
+        await self.disconnect(silent=True)
+        if username and password:
+            await self.login(username, password)
+
+    async def logout(self) -> None:
+        await self.disconnect(silent=True)
+        self.authenticated = False
+        self.status = "disconnected"
+        self.username = ""
+        self.password = ""
+        self.error = ""
         self.peers = []
+        self.messages.clear()
+        self.outbox_queue.clear()

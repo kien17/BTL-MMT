@@ -3,57 +3,177 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LAN Collaboration</title>
+  <title>LAN Collaboration — Streaming & Offline Queue</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header>
-    <div class="brand">LAN Collaboration</div>
-    <div class="status">
+  <header class="topbar">
+    <div class="brand-group">
+      <div class="brand-logo">⚡</div>
+      <div>
+        <div class="brand">LAN Collaboration</div>
+        <div class="brand-sub">UDP Reliable Stream · AES-256-GCM · Offline Queue</div>
+      </div>
+    </div>
+
+    <div class="status-pill" id="status-pill">
       <span id="status-dot" class="dot"></span>
       <span id="status-text">disconnected</span>
-      <span id="user-text"></span>
+      <span id="user-text" class="user-badge"></span>
     </div>
+
     <div class="actions">
-      <button id="reconnect-btn" type="button" class="secondary">Reconnect</button>
-      <button id="logout-btn" type="button" class="secondary">Logout</button>
+      <button id="offline-btn" type="button" class="secondary hidden" title="Ngắt kết nối tạm thời để kiểm thử nhận/gửi tin nhắn lúc Offline">
+        🌙 Chuyển Offline
+      </button>
+      <button id="reconnect-btn" type="button" class="accent-outline" title="Kết nối lại với Server để nhận tin nhắn từ Offline Queue">
+        🔄 Kết nối lại
+      </button>
+      <button id="logout-btn" type="button" class="secondary">Đăng xuất</button>
     </div>
   </header>
 
   <main>
-    <section id="login-panel" class="login">
-      <h1>Sign in</h1>
-      <p class="muted">Demo users: alice / bob / charlie, password <code>password123</code></p>
+    <section id="login-panel" class="login-card">
+      <div class="login-header">
+        <div class="login-icon">💬</div>
+        <h1>Đăng nhập hệ thống</h1>
+        <p class="muted">Chọn nhanh tài khoản demo hoặc nhập thông tin đăng nhập bên dưới</p>
+      </div>
+
+      <div class="quick-users">
+        <button type="button" class="user-chip active" data-user="alice">
+          <span class="chip-avatar avatar-alice">A</span>
+          <span>
+            <strong>alice</strong>
+            <small>Demo User 1</small>
+          </span>
+        </button>
+        <button type="button" class="user-chip" data-user="bob">
+          <span class="chip-avatar avatar-bob">B</span>
+          <span>
+            <strong>bob</strong>
+            <small>Demo User 2</small>
+          </span>
+        </button>
+        <button type="button" class="user-chip" data-user="charlie">
+          <span class="chip-avatar avatar-charlie">C</span>
+          <span>
+            <strong>charlie</strong>
+            <small>Demo User 3</small>
+          </span>
+        </button>
+      </div>
+
       <form id="login-form">
-        <label>Username<input id="login-username" autocomplete="username" value="alice" required></label>
-        <label>Password<input id="login-password" type="password" autocomplete="current-password" value="password123" required></label>
-        <button type="submit">Connect</button>
+        <label>
+          <span>Tên người dùng (Username)</span>
+          <input id="login-username" autocomplete="username" value="alice" required>
+        </label>
+        <label>
+          <span>Mật khẩu (Password)</span>
+          <input id="login-password" type="password" autocomplete="current-password" value="password123" required>
+        </label>
+        <button type="submit" class="btn-primary btn-block">Kết nối vào hệ thống</button>
       </form>
       <p id="login-error" class="error"></p>
     </section>
 
     <section id="app-panel" class="app hidden">
-      <aside class="peers">
-        <h2>Online peers</h2>
-        <ul id="peer-list"></ul>
+      <!-- Left Sidebar: Conversations & All Peers (Online + Offline) -->
+      <aside class="peers sidebar-left">
+        <div class="sidebar-header">
+          <h2>Hội thoại & Danh bạ</h2>
+          <span id="online-counter" class="counter-pill">0 online</span>
+        </div>
+        <div class="search-box">
+          <input id="peer-search" type="search" placeholder="Tìm kênh hoặc người dùng..." autocomplete="off">
+        </div>
+        <ul id="peer-list" class="conversation-list"></ul>
       </aside>
 
+      <!-- Center Panel: Chat Conversation -->
       <section class="chat">
+        <div class="chat-header">
+          <div class="chat-target-info">
+            <div id="active-avatar" class="avatar broadcast">📢</div>
+            <div>
+              <div class="chat-title-row">
+                <h3 id="active-chat-title">Kênh Chung (Broadcast)</h3>
+                <span id="active-chat-badge" class="target-badge online">Toàn mạng</span>
+              </div>
+              <p id="active-chat-subtitle" class="muted">
+                Tin nhắn gửi tới tất cả người dùng đang trực tuyến
+              </p>
+            </div>
+          </div>
+          <div class="chat-header-actions">
+            <button id="filter-mode-btn" type="button" class="secondary btn-sm" title="Chuyển đổi giữa xem hội thoại đang chọn hoặc tất cả tin nhắn">
+              🔍 Hội thoại này
+            </button>
+          </div>
+        </div>
+
+        <div id="offline-banner" class="offline-banner hidden">
+          <div class="offline-banner-text">
+            <strong>⚡ Bạn đang ở chế độ Offline.</strong>
+            <span>Tin nhắn người khác gửi cho bạn được lưu trên Server Queue; tin nhắn bạn gửi bây giờ sẽ vào Outbox Queue và tự động gửi khi kết nối lại.</span>
+          </div>
+          <button id="banner-reconnect-btn" type="button" class="btn-sm">Kết nối ngay</button>
+        </div>
+
         <div id="messages" class="messages"></div>
-        <form id="send-form" class="send-form">
-          <select id="send-to" aria-label="Recipient"></select>
-          <input id="send-text" placeholder="Type a message..." autocomplete="off" required>
-          <button type="submit">Send</button>
-        </form>
-        <form id="file-form" class="file-form">
-          <input id="file-input" type="file" required>
-          <button type="submit" class="secondary">Send file</button>
-        </form>
+
+        <div class="composer-area">
+          <form id="send-form" class="send-form">
+            <select id="send-to" aria-label="Người nhận" title="Chọn người nhận (hỗ trợ cả Online và Offline)"></select>
+            <input id="send-text" placeholder="Nhập tin nhắn (vẫn gửi vào Queue được khi người nhận hoặc bạn đang Offline)..." autocomplete="off" required>
+            <button type="submit" class="btn-send">Gửi ➤</button>
+          </form>
+
+          <form id="file-form" class="file-form">
+            <label class="file-picker-label">
+              <span>📎 Chọn tệp đính kèm</span>
+              <input id="file-input" type="file" required>
+            </label>
+            <span id="file-selected-name" class="file-selected-name muted">Chưa chọn tệp (tối đa 100MB, kiểm tra SHA-256)</span>
+            <button type="submit" class="secondary btn-sm">Gửi File ↑</button>
+          </form>
+        </div>
       </section>
 
-      <aside class="transfers">
-        <h2>Transfers</h2>
-        <div id="transfer-list"></div>
+      <!-- Right Sidebar: Offline Queue Monitor & File Transfers -->
+      <aside class="transfers sidebar-right">
+        <div class="panel-section">
+          <div class="sidebar-header">
+            <h2>Hàng đợi Offline (Queue)</h2>
+            <span id="queue-total-badge" class="counter-pill warn">0</span>
+          </div>
+          <div class="queue-stats">
+            <div class="stat-box" title="Tin nhắn bạn soạn khi mất mạng, chờ gửi lên Server">
+              <span class="stat-num" id="stat-outbox">0</span>
+              <span class="stat-label">Outbox chờ mạng</span>
+            </div>
+            <div class="stat-box" title="Tin nhắn đang lưu trên Server chờ người nhận Online">
+              <span class="stat-num" id="stat-server-queue">0</span>
+              <span class="stat-label">Chờ người nhận</span>
+            </div>
+            <div class="stat-box" title="Tin nhắn bạn nhận được từ hàng đợi sau khi Online lại">
+              <span class="stat-num" id="stat-received-offline">0</span>
+              <span class="stat-label">Đã nhận Offline</span>
+            </div>
+          </div>
+          <div id="queue-list" class="queue-list"></div>
+        </div>
+
+        <div class="panel-divider"></div>
+
+        <div class="panel-section">
+          <div class="sidebar-header">
+            <h2>Truyền Tệp (Transfers)</h2>
+          </div>
+          <div id="transfer-list" class="transfer-list"></div>
+        </div>
       </aside>
     </section>
   </main>

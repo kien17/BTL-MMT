@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass
@@ -95,9 +96,16 @@ class Router:
 
         recipient = self.sessions.get_by_name(to)
         if recipient is not None and recipient.udp_ready:
-            recipient.send_app(AppType.TEXT, payload)
-            self._send_text_ack(session, msg_id, to, "delivered")
-            return
+            stream_id = recipient.send_app(AppType.TEXT, payload)
+            if stream_id is not None:
+                recipient.pending_live[stream_id] = {
+                    "msg_id": msg_id,
+                    "sender": session.username,
+                    "recipient": to,
+                    "payload": payload,
+                }
+                self._send_text_ack(session, msg_id, to, "delivered")
+                return
         if not self.storage.user_exists(to):
             self._send_text_ack(session, msg_id, to, "unknown_recipient")
             return
@@ -109,6 +117,48 @@ class Router:
             payload=json.dumps(payload, separators=(",", ":"), ensure_ascii=False),
         )
         self._send_text_ack(session, msg_id, to, "queued" if stored else "offline_queue_full")
+        if stored:
+            self._schedule_presence_broadcast()
+
+    def _schedule_presence_broadcast(self) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.sessions.broadcast_presence())
+        except RuntimeError:
+            pass
+
+    def _rescue_live_message(self, info: dict) -> None:
+        msg_id = str(info.get("msg_id", ""))
+        sender = str(info.get("sender", ""))
+        recipient = str(info.get("recipient", ""))
+        payload = info.get("payload")
+        if not msg_id or not sender or not recipient or not isinstance(payload, dict):
+            return
+        if not self.storage.user_exists(recipient):
+            return
+        stored = self.storage.enqueue_offline(
+            sender=sender,
+            recipient=recipient,
+            msg_id=msg_id,
+            payload=json.dumps(payload, separators=(",", ":"), ensure_ascii=False),
+        )
+        sender_session = self.sessions.get_by_name(sender)
+        if sender_session is not None and sender_session.udp_ready:
+            self._send_text_ack(
+                sender_session,
+                msg_id,
+                recipient,
+                "queued" if stored else "offline_queue_full",
+            )
+        if stored:
+            self._schedule_presence_broadcast()
+
+    def on_session_closed(self, session: Session) -> None:
+        if not session.pending_live:
+            return
+        for info in list(session.pending_live.values()):
+            self._rescue_live_message(info)
+        session.pending_live.clear()
 
     def _send_text_ack(self, session: Session, msg_id: str, to: str, status: str) -> None:
         session.send_app(
@@ -261,14 +311,31 @@ class Router:
             except json.JSONDecodeError:
                 continue
             payload["offline"] = True
+            payload["queued_at"] = message.get("created_at", "")
             stream_id = session.send_app(AppType.TEXT, payload)
             if stream_id is not None:
                 session.pending_offline[stream_id] = message["msg_id"]
+                session.pending_live[stream_id] = {
+                    "offline_sender": str(message.get("sender", payload.get("from", ""))),
+                    "msg_id": message["msg_id"],
+                }
 
     def on_stream_acked(self, session: Session, stream_id: int) -> None:
+        live_info = session.pending_live.pop(stream_id, None)
         msg_id = session.pending_offline.pop(stream_id, None)
         if msg_id is not None:
             self.storage.mark_delivered(msg_id)
+            offline_sender = (
+                str(live_info.get("offline_sender", "")) if isinstance(live_info, dict) else ""
+            )
+            if offline_sender:
+                sender_session = self.sessions.get_by_name(offline_sender)
+                if sender_session is not None and sender_session.udp_ready:
+                    self._send_text_ack(sender_session, msg_id, session.username, "delivered")
+            self._schedule_presence_broadcast()
 
     def on_stream_failed(self, session: Session, stream_id: int) -> None:
         session.pending_offline.pop(stream_id, None)
+        live_info = session.pending_live.pop(stream_id, None)
+        if isinstance(live_info, dict) and "payload" in live_info:
+            self._rescue_live_message(live_info)

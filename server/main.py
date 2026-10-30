@@ -54,7 +54,7 @@ class CollabServer:
             offline_max_per_user=self.config.server.offline_max_per_user,
             offline_max_payload=self.config.server.offline_max_payload,
         )
-        self.sessions = SessionManager()
+        self.sessions = SessionManager(self.storage)
         self.router = Router(self)
         self.tcp_server: asyncio.AbstractServer | None = None
         self.udp_transport: asyncio.DatagramTransport | None = None
@@ -209,6 +209,7 @@ class CollabServer:
         finally:
             if session is not None:
                 self.sessions.remove(session)
+                self.router.on_session_closed(session)
                 self.router.abort_transfers_for(session.username)
                 LOGGER.info("user offline: %s", session.username)
                 await self.sessions.broadcast_presence()

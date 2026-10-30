@@ -110,6 +110,10 @@ class UIServer:
                 return
             await self._send_json(writer, 200, {"ok": True, "msg_id": msg_id})
             return
+        if method == "POST" and path == "/api/disconnect":
+            await self.core.disconnect()
+            await self._send_json(writer, 200, {"ok": True, "state": self.core.get_state()})
+            return
         if method == "POST" and path == "/api/reconnect":
             try:
                 await self.core.reconnect()
