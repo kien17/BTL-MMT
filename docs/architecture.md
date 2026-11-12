@@ -33,7 +33,7 @@ TCP được dùng cho control plane (handshake, auth, presence, heartbeat). UDP
 - Presence: danh sách user online, cập nhật khi join/leave.
 - Chat broadcast toàn mạng và unicast.
 - Gửi file tối đa 100MB, có kiểm tra SHA-256.
-- Offline message queue cho tin nhắn text unicast.
+- Offline message queue cho tin nhắn text (unicast và broadcast).
 - Heartbeat, timeout, graceful disconnect, reconnect thủ công.
 - Mã hoá payload TCP/UDP bằng session key.
 - HTTP UI + JavaScript thuần, polling (không WebSocket).
@@ -59,7 +59,7 @@ Cách xử lý: dùng kiến trúc **hybrid**:
 
 | Plane | Transport | Nội dung |
 |---|---|---|
-| Control plane | TCP | HELLO, ECDH, auth, presence, heartbeat, control/error, file offer/accept |
+| Control plane | TCP | HELLO, ECDH, auth, presence, heartbeat, control/error |
 | Data plane | UDP | Chat, file metadata/chunk/end, reliability, congestion control |
 
 Cách này thoả cả Step 2 (TCP handshake) và các yêu cầu UDP streaming/reliability/HoL. Lý do được ghi rõ trong báo cáo để tránh mất điểm.
@@ -128,7 +128,7 @@ flowchart LR
 | `app_protocol.py` | App frame (TEXT, FILE_META, FILE_CHUNK, ...) và reassembler |
 | `crypto.py` | X25519, HKDF, AES-256-GCM, scrypt password, SHA-256 file |
 | `reliability.py` | Sliding window, SACK, RTO, retransmit, flow control |
-| `congestion.py` | Reno (mặc định), CUBIC (tuỳ chọn) |
+| `congestion.py` | Reno (mặc định), CUBIC, BBR (tuỳ chọn) |
 | `config.py` | Đọc `config.toml`, dataclass cấu hình |
 
 ### 5.2 `server/`
@@ -207,7 +207,6 @@ Các type chính:
 | `AUTH_OK` | S→C | token, peers, UDP endpoint |
 | `AUTH_ERR` | S→C | lý do |
 | `PRESENCE` | S→C | snapshot/update user online |
-| `FILE_CTRL` | hai chiều | accept/reject/result |
 | `PING` / `PONG` | hai chiều | heartbeat |
 | `BYE` | hai chiều | graceful close |
 | `ERROR` | S→C | lỗi ứng dụng |
@@ -223,8 +222,10 @@ Các type chính:
 | `FILE_RESULT` | JSON `{transfer_id, ok, error}` |
 | `FILE_ACCEPT` | JSON `{transfer_id}` |
 | `FILE_REJECT` | JSON `{transfer_id, reason}` |
-| `FILE_INCOMING` | JSON `{transfer_id, from, name, size}` |
+| `FILE_INCOMING` | JSON `{transfer_id, from, name, size, sha256}` |
 | `TEXT_ACK` | JSON `{msg_id, status, to}` |
+
+Các message điều khiển file (`FILE_META`, `FILE_CHUNK`, `FILE_END`, `FILE_RESULT`, `FILE_ACCEPT`, `FILE_REJECT`, `FILE_INCOMING`) đều đi trong app frame trên UDP tin cậy, không dùng một message TCP riêng.
 
 Mỗi message/file dùng `stream_id` riêng. Receiver giữ ordering riêng từng stream nên một file bị mất gói không chặn chat hoặc file khác.
 
@@ -294,6 +295,8 @@ sequenceDiagram
     A->>S: APP_TEXT {msg_id, to=B, text}
     alt B online
         S->>B: APP_TEXT {from=A, to=B, text}
+        S->>S: pending_live[stream_id]
+        B->>S: UDP ACK
         S->>A: TEXT_ACK {status=delivered}
     else B offline
         S->>S: INSERT offline_messages
@@ -304,9 +307,9 @@ sequenceDiagram
 ### 7.4 Chat broadcast
 
 - `to = "*"`.
-- Server fan-out tới mọi session online trừ sender.
-- Không queue broadcast cho user offline.
-- Sender nhận `TEXT_ACK {status=broadcast}`.
+- Server fan-out tới mọi session online có UDP ready trừ sender.
+- User offline (hoặc online nhưng chưa UDP ready) được đưa vào offline queue; khóa DB dùng riêng theo recipient (`<msg_id>:<recipient>`) để dedupe.
+- Sender nhận `TEXT_ACK {status=broadcast:N}` hoặc `broadcast:N;queued:M`.
 
 ### 7.5 File transfer (hop-by-hop)
 
@@ -341,7 +344,7 @@ sequenceDiagram
 ### 7.6 Offline message queue (Server Queue & Client Outbox)
 
 - **Server-side Offline Queue (khi người nhận offline)**:
-  - Áp dụng cho tin nhắn text unicast.
+  - Áp dụng cho tin nhắn text (cả unicast và broadcast).
   - Server lưu vào SQLite (`offline_messages`) với `msg_id` duy nhất và `expires_at`.
   - Nếu người nhận ngắt kết nối đột ngột khi gói UDP chưa được ACK (`pending_live`), server tự động cứu tin nhắn chưa ACK đưa vào `offline_messages` và báo `TEXT_ACK {status=queued}` cho người gửi.
   - Khi người nhận login và kênh UDP sẵn sàng (`UDP HELLO`), server đẩy toàn bộ tin nhắn chưa delivered theo thứ tự `created_at` với cờ `offline: true`.
@@ -386,7 +389,7 @@ sequenceDiagram
   - Slow start: `cwnd += acked` khi `cwnd < ssthresh`.
   - Congestion avoidance: tăng xấp xỉ `acked / cwnd`.
   - Loss/timeout: giảm `ssthresh = max(cwnd/2, 2)`, `cwnd = 1` khi timeout.
-- **CUBIC** là tuỳ chọn cấu hình; BBR ghi chú là hướng mở rộng, không triển khai trong phạm vi 1 ngày.
+- **CUBIC** và **BBR** là tuỳ chọn cấu hình. BBR ước lượng bandwidth từ tốc độ ACK và RTT nhỏ nhất để tính BDP, sau đó điều chỉnh `cwnd` theo BDP; loss/timeout giảm nhẹ thay vì reset sâu như Reno.
 
 ### 8.3 Vì sao không HoL
 
@@ -478,6 +481,7 @@ CREATE INDEX IF NOT EXISTS idx_offline_recipient
 │   ├── run_client.py
 │   └── run_server.py
 ├── tests/
+│   ├── test_congestion.py
 │   ├── test_crypto.py
 │   ├── test_offline_queue.py
 │   ├── test_protocol.py
@@ -555,19 +559,20 @@ python scripts/run_client.py --username bob --password password123 --ui-port 808
 
 ---
 
-## 15. Roadmap triển khai trong ngày
+## 15. Challenges & Solutions
 
-| Block | Nội dung |
-|---|---|
-| 0 | venv + requirements + `.gitignore` |
-| 1 | Tài liệu kiến trúc |
-| 2 | Scaffold + protocol + config + SQLite |
-| 3 | TCP handshake |
-| 4 | Auth + session + presence |
-| 5 | UDP reliability + chat |
-| 6 | Offline text queue |
-| 7 | File transfer |
-| 8 | Crypto |
-| 9 | HTTP UI + JS polling |
-| 10 | Heartbeat/timeout/reconnect + test + README |
-| 11 | Docker (optional) |
+### 15.1. UDP fragmentation và MTU
+
+UDP không tự chia nhỏ datagram ở tầng ứng dụng, còn IP fragmentation làm tăng mạnh xác suất mất toàn bộ datagram khi một mảnh lỗi và không được nhiều NAT/firewall xử lý tốt. Vì vậy hệ thống chủ động chia dữ liệu ở tầng ứng dụng với chunk tối đa 700 byte (`protocol.chunk_size`). Mỗi gói còn có header UDP 32 byte, app frame nhỏ, và với gói mã hoá AES-256-GCM thêm nonce 12 byte + tag 16 byte. Tổng kích thước vẫn dưới 1200 byte, thấp hơn MTU phổ biến 1500 byte sau khi trừ IP/UDP header, nên tránh IP fragmentation trong đa số mạng LAN/Internet. File được gửi thành nhiều `FILE_CHUNK`, mỗi chunk kèm `transfer_id`; receiver ghép lại theo stream và kiểm tra SHA-256 ở `FILE_END`. Nếu triển khai trên đường hầm VPN có MTU thấp hơn, chỉ cần giảm `chunk_size` trong cấu hình mà không đổi giao thức.
+
+### 15.2. Head-of-line blocking
+
+Nếu dùng một chuỗi byte đơn cho toàn bộ kết nối, một gói chat bị mất sẽ chặn cả file lớn phía sau vì receiver phải chờ đúng sequence tiếp theo. Hệ thống tránh HoL bằng cách multiplex nhiều `stream_id` độc lập trên cùng socket UDP. Mỗi stream có `expected_seq`, buffer out-of-order và ACK/SACK riêng; retransmit của stream này không làm dừng stream khác. Chat, broadcast, file và các message điều khiển file là các stream khác nhau. Ở phía ứng dụng, `AppReassembler` cũng tách frame theo `stream_id`, còn `FileTransferManager` giữ trạng thái riêng cho từng transfer. Nhờ vậy mất gói trên luồng file 5 MB không làm chat bị treo, và nhiều file cùng lúc cũng tiến triển độc lập.
+
+### 15.3. Concurrency, TCP control và UDP data
+
+Server chạy một asyncio event loop, nên mọi thao tác I/O đều không blocking; đọc/ghi file dùng cách stream từng khối và `await` hợp lý. TCP control dùng `write_lock` để tránh hai task ghi đan xen frame, trong khi UDP endpoint gửi packet qua callback đồng bộ. Các thao tác có thể block như gửi file được chạy trong task riêng, không giữ lock khi chờ. Backpressure dùng `send_window` lấy từ ACK của peer và `outstanding(stream_id)` để dừng đọc file khi cửa sổ đầy, tránh bộ nhớ tăng vô hạn. Các cấu trúc `pending_live`, `pending_offline`, `file_relays` được pop/cleanup theo stream và session; không có lock lồng nhau giữa TCP và UDP. Khi session đóng, transfer đang relay bị abort và message chưa ACK được đưa về hàng đợi bền vững, nên không có deadlock hay task treo vô hạn.
+
+### 15.4. Connection resilience và bảo toàn message
+
+TCP control có thể đứt sau khi client đã gửi text qua UDP nhưng trước khi recipient ACK. Nếu server ACK “delivered” ngay, message có thể mất mà sender tưởng đã giao. Vì vậy server giữ message trong `recipient.pending_live[stream_id]`; chỉ khi UDP stream được ACK mới gửi `TEXT_ACK` “delivered” cho sender. Nếu stream fail hoặc recipient disconnect, message được rescue vào SQLite (`offline_messages`) với `msg_id` duy nhất, rồi gửi “queued” cho sender nếu còn online. Recipient khi đăng nhập lại nhận message qua `deliver_offline`; server chỉ đánh dấu `delivered_at` sau khi UDP ACK, nên retry không tạo bản trùng. Broadcast offline dùng khóa DB riêng theo từng recipient (`<msg_id>:<recipient>`) để không vi phạm unique constraint, còn payload vẫn giữ `msg_id` gốc để client dedupe khi vừa nhận live vừa nhận lại từ queue. Phía client giữ `outbox_queue` cho message tạo lúc offline và requeue các message còn trạng thái `sending` khi mất kết nối. File đang truyền không resume mà bị huỷ và báo lỗi, vì assignment ưu tiên tính đúng đắn của text và giới hạn thời gian triển khai.

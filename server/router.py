@@ -86,12 +86,35 @@ class Router:
 
         if to == "*":
             delivered = 0
+            queued = 0
+            live_users: set[str] = set()
             for peer in self.sessions.all():
                 if peer.username == session.username or not peer.udp_ready:
                     continue
-                peer.send_app(AppType.TEXT, payload)
+                stream_id = peer.send_app(AppType.TEXT, payload)
+                if stream_id is None:
+                    continue
                 delivered += 1
-            self._send_text_ack(session, msg_id, to, f"broadcast:{delivered}")
+                live_users.add(peer.username)
+                peer.pending_live[stream_id] = {
+                    "msg_id": msg_id,
+                    "sender": session.username,
+                    "recipient": peer.username,
+                    "payload": payload,
+                    "notify": False,
+                    "broadcast": True,
+                }
+            for username in self.storage.list_users():
+                if username == session.username or username in live_users:
+                    continue
+                if self._enqueue_text(session.username, username, msg_id, payload, broadcast=True):
+                    queued += 1
+            status = f"broadcast:{delivered}"
+            if queued:
+                status += f";queued:{queued}"
+            self._send_text_ack(session, msg_id, to, status)
+            if queued:
+                self._schedule_presence_broadcast()
             return
 
         recipient = self.sessions.get_by_name(to)
@@ -103,22 +126,35 @@ class Router:
                     "sender": session.username,
                     "recipient": to,
                     "payload": payload,
+                    "notify": True,
+                    "broadcast": False,
                 }
-                self._send_text_ack(session, msg_id, to, "delivered")
                 return
         if not self.storage.user_exists(to):
             self._send_text_ack(session, msg_id, to, "unknown_recipient")
             return
 
-        stored = self.storage.enqueue_offline(
-            sender=session.username,
-            recipient=to,
-            msg_id=msg_id,
-            payload=json.dumps(payload, separators=(",", ":"), ensure_ascii=False),
-        )
+        stored = self._enqueue_text(session.username, to, msg_id, payload)
         self._send_text_ack(session, msg_id, to, "queued" if stored else "offline_queue_full")
         if stored:
             self._schedule_presence_broadcast()
+
+    def _enqueue_text(
+        self,
+        sender: str,
+        recipient: str,
+        msg_id: str,
+        payload: dict,
+        *,
+        broadcast: bool = False,
+    ) -> bool:
+        stored_id = f"{msg_id}:{recipient}" if broadcast else msg_id
+        return self.storage.enqueue_offline(
+            sender=sender,
+            recipient=recipient,
+            msg_id=stored_id,
+            payload=json.dumps(payload, separators=(",", ":"), ensure_ascii=False),
+        )
 
     def _schedule_presence_broadcast(self) -> None:
         try:
@@ -136,14 +172,19 @@ class Router:
             return
         if not self.storage.user_exists(recipient):
             return
-        stored = self.storage.enqueue_offline(
-            sender=sender,
-            recipient=recipient,
-            msg_id=msg_id,
-            payload=json.dumps(payload, separators=(",", ":"), ensure_ascii=False),
+        stored = self._enqueue_text(
+            sender,
+            recipient,
+            msg_id,
+            payload,
+            broadcast=bool(info.get("broadcast", False)),
         )
         sender_session = self.sessions.get_by_name(sender)
-        if sender_session is not None and sender_session.udp_ready:
+        if (
+            bool(info.get("notify", True))
+            and sender_session is not None
+            and sender_session.udp_ready
+        ):
             self._send_text_ack(
                 sender_session,
                 msg_id,
@@ -203,9 +244,10 @@ class Router:
         self.file_relays[key] = relay
 
         session.send_app(AppType.FILE_ACCEPT, {"transfer_id": transfer_id})
-        recipient.send_app(
+        recipient.send_app_chunk(
+            relay.out_stream_id,
             AppType.FILE_INCOMING,
-            {
+            obj={
                 "transfer_id": transfer_id,
                 "from": session.username,
                 "to": recipient.username,
@@ -213,6 +255,7 @@ class Router:
                 "size": size,
                 "sha256": sha256,
             },
+            flags=Flags.FIRST | Flags.LAST,
         )
 
     def _handle_file_chunk(self, session: Session, stream_id: int, data: bytes) -> None:
@@ -253,8 +296,9 @@ class Router:
             relay.out_stream_id,
             AppType.FILE_END,
             obj={"transfer_id": transfer_id, "sha256": sha256, "size": relay.size},
-            flags=Flags.LAST,
+            flags=Flags.FIRST | Flags.LAST,
         )
+        recipient.close_app_stream(relay.out_stream_id)
 
     def _handle_file_result(self, session: Session, obj: dict) -> None:
         try:
@@ -290,6 +334,9 @@ class Router:
                 AppType.FILE_RESULT,
                 {"transfer_id": relay.transfer_id, "ok": False, "error": reason},
             )
+        recipient = self.sessions.get_by_name(relay.recipient)
+        if recipient is not None:
+            recipient.close_app_stream(relay.out_stream_id)
         self.file_relays.pop((relay.sender, relay.transfer_id), None)
 
     def abort_transfers_for(self, username: str) -> None:
@@ -318,6 +365,7 @@ class Router:
                 session.pending_live[stream_id] = {
                     "offline_sender": str(message.get("sender", payload.get("from", ""))),
                     "msg_id": message["msg_id"],
+                    "notify": payload.get("to") != "*",
                 }
 
     def on_stream_acked(self, session: Session, stream_id: int) -> None:
@@ -328,14 +376,34 @@ class Router:
             offline_sender = (
                 str(live_info.get("offline_sender", "")) if isinstance(live_info, dict) else ""
             )
-            if offline_sender:
+            notify = bool(live_info.get("notify", True)) if isinstance(live_info, dict) else True
+            if offline_sender and notify:
                 sender_session = self.sessions.get_by_name(offline_sender)
                 if sender_session is not None and sender_session.udp_ready:
                     self._send_text_ack(sender_session, msg_id, session.username, "delivered")
             self._schedule_presence_broadcast()
+            return
+        if (
+            isinstance(live_info, dict)
+            and "payload" in live_info
+            and bool(live_info.get("notify", True))
+        ):
+            sender = str(live_info.get("sender", ""))
+            sender_session = self.sessions.get_by_name(sender)
+            if sender_session is not None and sender_session.udp_ready:
+                self._send_text_ack(
+                    sender_session,
+                    str(live_info.get("msg_id", "")),
+                    session.username,
+                    "delivered",
+                )
 
     def on_stream_failed(self, session: Session, stream_id: int) -> None:
         session.pending_offline.pop(stream_id, None)
         live_info = session.pending_live.pop(stream_id, None)
         if isinstance(live_info, dict) and "payload" in live_info:
             self._rescue_live_message(live_info)
+        for relay in list(self.file_relays.values()):
+            if relay.recipient == session.username and relay.out_stream_id == stream_id:
+                self._abort_relay(relay, "delivery_failed")
+                break

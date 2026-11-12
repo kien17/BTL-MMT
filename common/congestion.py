@@ -74,7 +74,59 @@ class Cubic(CongestionController):
         return max(1.0, self.cwnd)
 
 
+class BBR(CongestionController):
+    """Lightweight BBR-inspired controller.
+
+    The real BBR keeps a bottleneck-bandwidth estimate and a minimum RTT, then
+    derives the congestion window from their product (BDP).  This project only
+    has ACK counts at this layer, so ACK arrival time is used as the RTT sample
+    and ACKed packets divided by that interval as the delivery-rate sample.
+    """
+
+    def __init__(self, initial_window: float = 10.0, max_window: float = 256.0) -> None:
+        self.cwnd = max(2.0, min(initial_window, max_window))
+        self.max_window = max_window
+        self._min_rtt: float | None = None
+        self._bw = 0.0
+        self._last_ack_at: float | None = None
+        self._cwnd_gain = 2.0
+        self._loss_beta = 0.7
+
+    def on_ack(self, acked: int) -> None:
+        now = time.monotonic()
+        delivered = max(0, acked)
+        if self._last_ack_at is not None:
+            interval = max(1e-6, now - self._last_ack_at)
+            self._min_rtt = interval if self._min_rtt is None else min(self._min_rtt, interval)
+            sample_bw = delivered / interval
+            if sample_bw > self._bw:
+                self._bw = sample_bw
+            bdp = self._bw * max(self._min_rtt or 0.0, 1e-3)
+            target = bdp * self._cwnd_gain + 2.0
+            self.cwnd = max(self.cwnd, target)
+        else:
+            self.cwnd += delivered
+        self._last_ack_at = now
+        self.cwnd = max(2.0, min(self.max_window, self.cwnd))
+
+    def on_loss(self) -> None:
+        self._bw *= self._loss_beta
+        self.cwnd = max(2.0, self.cwnd * self._loss_beta)
+
+    def on_timeout(self) -> None:
+        self._bw *= 0.5
+        self.cwnd = max(2.0, self.cwnd * 0.5)
+        self._last_ack_at = None
+
+    @property
+    def window(self) -> float:
+        return max(1.0, self.cwnd)
+
+
 def make_controller(name: str, initial_window: float, max_window: float) -> CongestionController:
-    if name.lower() == "cubic":
+    normalized = name.strip().lower()
+    if normalized == "bbr":
+        return BBR(initial_window, max_window)
+    if normalized == "cubic":
         return Cubic(initial_window, max_window)
     return Reno(initial_window, max_window)

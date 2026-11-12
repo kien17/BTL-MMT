@@ -125,7 +125,8 @@ Test hiện có:
 
 - `tests/test_protocol.py`: header, CRC, TCP frame, app reassembler, AES-GCM.
 - `tests/test_crypto.py`: X25519, scrypt, SHA-256.
-- `tests/test_reliability.py`: lossless, mất gói + retransmit, không HoL giữa stream, file stream.
+- `tests/test_reliability.py`: lossless, mất gói + retransmit, không HoL giữa stream, file stream, cập nhật `peer_window` từ ACK và đóng stream tường minh.
+- `tests/test_congestion.py`: chọn Reno/CUBIC/BBR và giới hạn window.
 - `tests/test_offline_queue.py`: danh bạ online/offline, Server Offline Queue end-to-end, cập nhật ACK khi nhận tin offline, và Client Outbox Queue khi mất kết nối.
 
 ### Mô phỏng mất gói
@@ -167,7 +168,7 @@ docs/       architecture.md
 - Đề yêu cầu UDP streaming nhưng rubric Step 2 yêu cầu TCP handshake → dùng kiến trúc hybrid: TCP control + UDP data.
 - Reliability chạy **hop-by-hop** (client↔server, server↔client). Server relay nhận đúng thứ tự rồi forward.
 - Mỗi message/file dùng `stream_id` riêng → tránh Head-of-Line blocking.
-- File gửi cho user offline bị từ chối (`recipient_offline`); chỉ text unicast được queue.
+- File gửi cho user offline bị từ chối (`recipient_offline`); text unicast và broadcast được queue cho user offline.
 - Server relay thấy plaintext sau khi decrypt (mô hình client-server). Không có PKI nên chống MITM hạn chế; có thể pin server key nếu cần.
 
 ---

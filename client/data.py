@@ -7,6 +7,7 @@ from collections.abc import Callable
 
 from common.app_protocol import encode_app
 from common.config import Config
+from common.congestion import make_controller
 from common.constants import AppType, Flags, PacketType
 from common.protocol import (
     PacketHeader,
@@ -75,9 +76,20 @@ class DataClient:
             rto_min=self.config.protocol.rto_min,
             rto_max=self.config.protocol.rto_max,
             max_retries=self.config.protocol.max_retries,
+            congestion=make_controller(
+                self.config.protocol.congestion,
+                10.0,
+                float(self.config.protocol.window_packets * 4),
+            ),
         )
         self.send_hello()
         self._tick_task = asyncio.create_task(self._tick_loop(), name="client-udp-tick")
+
+    @property
+    def send_window(self) -> int:
+        if self.endpoint is not None:
+            return self.endpoint.send_window
+        return max(1, self.config.protocol.window_packets)
 
     async def wait_ready(self, timeout: float = 5.0) -> None:
         loop = asyncio.get_running_loop()
@@ -164,6 +176,10 @@ class DataClient:
         if self.endpoint is None:
             raise RuntimeError("udp not ready")
         self.endpoint.send_chunk(stream_id, encode_app(app_type, obj=obj, raw=raw), flags=flags)
+
+    def close_stream(self, stream_id: int) -> None:
+        if self.endpoint is not None:
+            self.endpoint.close_stream(stream_id)
 
     def outstanding(self, stream_id: int) -> int:
         if self.endpoint is None:

@@ -348,8 +348,16 @@ function renderStatusBadge(message, mine) {
     } else if (st === "delivered") {
       badges.push('<span class="badge status-delivered">✓✓ Đã nhận (Delivered)</span>');
     } else if (st.startsWith("broadcast:")) {
-      const count = st.split(":")[1] || "0";
+      const parts = Object.fromEntries(
+        st.split(";").map((item) => item.split(":"))
+      );
+      const count = parts.broadcast || "0";
       badges.push(`<span class="badge status-delivered">📡 Đã phát (${escapeHtml(count)} peers)</span>`);
+      if (parts.queued) {
+        badges.push(
+          `<span class="badge status-queued" title="Đã lưu vào Offline Queue cho người dùng đang Offline">🕒 Queue (${escapeHtml(parts.queued)} offline)</span>`
+        );
+      }
     } else if (st === "sending") {
       badges.push('<span class="badge status-sending">📤 Đang gửi UDP...</span>');
     } else {

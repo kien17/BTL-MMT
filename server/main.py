@@ -7,6 +7,7 @@ import logging
 import time
 
 from common.config import Config, load_config
+from common.congestion import make_controller
 from common.constants import Flags, PacketType, TCPType
 from common.crypto import (
     derive_session_key,
@@ -118,7 +119,6 @@ class CollabServer:
             if not username or len(username) > 64:
                 raise ProtocolError("invalid username")
             client_public = base64.b64decode(str(hello["public_key"]))
-            int(hello.get("udp_port", 0))
 
             server_private, server_public = generate_keypair()
             salt = random_salt(16)
@@ -189,8 +189,6 @@ class CollabServer:
                     await session.send_tcp({"type": TCPType.PONG, "ts": message.get("ts")})
                 elif message_type == TCPType.BYE:
                     break
-                elif message_type == TCPType.FILE_CTRL:
-                    continue
                 else:
                     await session.send_tcp(
                         {"type": TCPType.ERROR, "reason": "unsupported_control_message"}
@@ -279,6 +277,11 @@ class CollabServer:
                 rto_min=self.config.protocol.rto_min,
                 rto_max=self.config.protocol.rto_max,
                 max_retries=self.config.protocol.max_retries,
+                congestion=make_controller(
+                    self.config.protocol.congestion,
+                    10.0,
+                    float(self.config.protocol.window_packets * 4),
+                ),
             )
             LOGGER.info("udp bound for %s at %s", session.username, addr)
             asyncio.get_running_loop().create_task(self.sessions.broadcast_presence())

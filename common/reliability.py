@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -19,6 +20,8 @@ from common.protocol import PacketHeader
 SendPacket = Callable[[PacketHeader, bytes], None]
 DataCallback = Callable[[int, int, bytes], None]
 StreamCallback = Callable[[int], None]
+
+MAX_TRACKED_RECEIVE_STREAMS = 1024
 
 
 @dataclass
@@ -67,6 +70,7 @@ class ReliableEndpoint:
         self.on_stream_failed = on_stream_failed
         self.chunk_size = max(64, chunk_size)
         self.recv_window = max(1, window)
+        self.peer_window = max(1, window)
         self.rto_min = rto_min
         self.rto_max = rto_max
         self.max_retries = max_retries
@@ -76,6 +80,7 @@ class ReliableEndpoint:
         self.out_streams: dict[int, OutStream] = {}
         self.in_expected: dict[int, int] = {}
         self.in_buffer: dict[int, dict[int, tuple[int, bytes]]] = {}
+        self._in_stream_lru: OrderedDict[int, None] = OrderedDict()
 
         self.srtt: float | None = None
         self.rttvar: float = 0.0
@@ -83,7 +88,7 @@ class ReliableEndpoint:
 
     @property
     def send_window(self) -> int:
-        return max(1, min(self.recv_window, int(self.congestion.window)))
+        return max(1, min(self.peer_window, int(self.congestion.window)))
 
     def send_message(self, stream_id: int, payload: bytes, flags: int = 0) -> int:
         pieces = [payload[i : i + self.chunk_size] for i in range(0, len(payload), self.chunk_size)]
@@ -115,8 +120,6 @@ class ReliableEndpoint:
         chunk = OutChunk(seq=stream.next_seq, payload=payload, flags=int(flags))
         stream.chunks[stream.next_seq] = chunk
         stream.next_seq += 1
-        if flags & Flags.LAST:
-            stream.final = True
         stream.last_activity = self.clock()
         self._flush(stream)
 
@@ -202,14 +205,17 @@ class ReliableEndpoint:
     def _handle_data(self, header: PacketHeader, payload: bytes) -> None:
         stream_id = header.stream_id
         seq = header.seq
+        self._touch_receive_stream(stream_id)
         expected = self.in_expected.setdefault(stream_id, 0)
         buffer = self.in_buffer.setdefault(stream_id, {})
 
         if seq < expected:
             self._send_ack(stream_id, expected)
+            self._drop_empty_receive_buffer(stream_id)
             return
         if seq > expected + self.recv_window:
             self._send_ack(stream_id, expected)
+            self._drop_empty_receive_buffer(stream_id)
             return
 
         buffer[seq] = (header.flags, payload)
@@ -221,6 +227,19 @@ class ReliableEndpoint:
 
         self.in_expected[stream_id] = expected
         self._send_ack(stream_id, expected)
+        self._drop_empty_receive_buffer(stream_id)
+
+    def _touch_receive_stream(self, stream_id: int) -> None:
+        self._in_stream_lru[stream_id] = None
+        self._in_stream_lru.move_to_end(stream_id)
+        while len(self._in_stream_lru) > MAX_TRACKED_RECEIVE_STREAMS:
+            evicted, _ = self._in_stream_lru.popitem(last=False)
+            self.in_expected.pop(evicted, None)
+            self.in_buffer.pop(evicted, None)
+
+    def _drop_empty_receive_buffer(self, stream_id: int) -> None:
+        if not self.in_buffer.get(stream_id):
+            self.in_buffer.pop(stream_id, None)
 
     def _send_ack(self, stream_id: int, ack: int) -> None:
         sack = 0
@@ -242,6 +261,7 @@ class ReliableEndpoint:
             pass
 
     def _handle_ack(self, header: PacketHeader) -> None:
+        self.peer_window = max(1, header.window)
         stream = self.out_streams.get(header.stream_id)
         if stream is None:
             return

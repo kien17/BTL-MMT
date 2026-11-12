@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import mimetypes
+import uuid
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 
@@ -146,7 +147,12 @@ class UIServer:
         if not recipient:
             await self._send_json(writer, 400, {"ok": False, "error": "missing upload metadata"})
             return
-        upload_dir = Path(self.core.config.client.download_dir) / "uploads"
+        if length > self.core.config.protocol.max_file_size:
+            await self._send_json(writer, 400, {"ok": False, "error": "file too large"})
+            return
+        upload_dir = (
+            Path(self.core.config.client.download_dir) / "uploads" / uuid.uuid4().hex
+        )
         upload_dir.mkdir(parents=True, exist_ok=True)
         upload_path = upload_dir / filename
         remaining = length

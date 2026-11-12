@@ -91,6 +91,47 @@ def test_offline_queue_end_to_end_and_outbox(tmp_path: Path) -> None:
                     break
             assert next(m for m in alice.messages if m.get("msg_id") == msg_id_1)["status"] == "delivered"
 
+            live_id = await alice.send_text("bob", "tin nhan live")
+            for _ in range(40):
+                await asyncio.sleep(0.05)
+                if any(m.get("msg_id") == live_id for m in bob.messages):
+                    break
+            live_received = next(m for m in bob.messages if m.get("msg_id") == live_id)
+            assert live_received["text"] == "tin nhan live"
+            assert live_received["offline"] is False
+            for _ in range(30):
+                await asyncio.sleep(0.05)
+                live_status = next(
+                    m for m in alice.messages if m.get("msg_id") == live_id
+                )["status"]
+                if live_status == "delivered":
+                    break
+            assert live_status == "delivered"
+
+            broadcast_id = await alice.send_text("*", "broadcast live va offline")
+            for _ in range(30):
+                await asyncio.sleep(0.05)
+                broadcast_status = next(
+                    m for m in alice.messages if m.get("msg_id") == broadcast_id
+                )["status"]
+                if "queued:1" in str(broadcast_status):
+                    break
+            assert broadcast_status == "broadcast:1;queued:1"
+            assert any(m.get("msg_id") == broadcast_id for m in bob.messages)
+
+            charlie = ClientCore(make_client_cfg())
+            await charlie.login("charlie", "password123")
+            for _ in range(40):
+                await asyncio.sleep(0.05)
+                if any(m.get("msg_id") == broadcast_id for m in charlie.messages):
+                    break
+            charlie_received = next(
+                m for m in charlie.messages if m.get("msg_id") == broadcast_id
+            )
+            assert charlie_received["text"] == "broadcast live va offline"
+            assert charlie_received["offline"] is True
+            await charlie.logout()
+
             # Bob switches to offline mode and queues a message in local Outbox
             await bob.disconnect()
             assert bob.get_state()["logged_in"] is True

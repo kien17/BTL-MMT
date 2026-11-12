@@ -69,6 +69,10 @@ class Session:
         payload = encode_app(app_type, obj=obj, raw=raw)
         self.endpoint.send_chunk(stream_id, payload, flags=flags)
 
+    def close_app_stream(self, stream_id: int) -> None:
+        if self.endpoint is not None:
+            self.endpoint.close_stream(stream_id)
+
 
 class SessionManager:
     def __init__(self, storage: Storage | None = None) -> None:

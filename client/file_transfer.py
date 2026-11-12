@@ -92,7 +92,7 @@ class FileTransferManager:
                     chunk = handle.read(self.core.config.protocol.chunk_size)
                     if not chunk:
                         break
-                    while self.core.data.outstanding(stream_id) >= self.core.config.protocol.window_packets:
+                    while self.core.data.outstanding(stream_id) >= self.core.data.send_window:
                         if transfer.status in {"failed", "rejected"}:
                             return transfer_id
                         await asyncio.sleep(0.01)
@@ -109,8 +109,9 @@ class FileTransferManager:
                 stream_id,
                 AppType.FILE_END,
                 obj={"transfer_id": transfer_id, "sha256": digest},
-                flags=Flags.LAST,
+                flags=Flags.FIRST | Flags.LAST,
             )
+            self.core.data.close_stream(stream_id)
             transfer.status = "verifying"
         except (ConnectionError, OSError, RuntimeError) as exc:
             transfer.status = "failed"

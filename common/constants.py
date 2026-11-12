@@ -67,7 +67,6 @@ class TCPType:
     PONG = "PONG"
     BYE = "BYE"
     ERROR = "ERROR"
-    FILE_CTRL = "FILE_CTRL"
 
 
 DEFAULT_USERS = [
